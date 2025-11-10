@@ -1,0 +1,41 @@
+{
+  "state": {
+    "arm_joints": {
+      "start": 0,
+      "end": 6,
+      "dtype": "float32"
+    },
+    "gripper": {
+      "start": 6,
+      "end": 7,
+      "dtype": "float32"
+    }
+  },
+  "action": {
+    "arm_joints": {
+      "start": 0,
+      "end": 6,
+      "absolute": true,
+      "dtype": "float32"
+    },
+    "gripper": {
+      "start": 6,
+      "end": 7,
+      "absolute": true,
+      "dtype": "float32"
+    }
+  },
+  "video": {
+    "external": {
+      "original_key": "observation.images.external"
+    },
+    "wrist": {
+      "original_key": "observation.images.wrist"
+    }
+  },
+  "annotation": {
+    "human.task_description": {
+        "original_key": "task_index"
+    }
+  }
+}
