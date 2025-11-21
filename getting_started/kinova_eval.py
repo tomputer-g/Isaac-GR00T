@@ -136,7 +136,8 @@ mse = calc_mse_for_single_trajectory(
     modality_keys=["arm_joints", "gripper"],
     steps=150,
     action_horizon=16,
-    plot=True
+    plot=True,
+    save_plot_path="./plot_result/eval.png"
 )
 
 print("MSE loss for trajectory 0:", mse)
