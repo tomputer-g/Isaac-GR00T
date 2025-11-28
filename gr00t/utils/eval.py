@@ -62,7 +62,7 @@ def calc_mse_for_single_trajectory(
             if data_point is None:
                 data_point = dataset.get_step_data(traj_id, step_count)
 
-            print("inferencing at step: ", step_count)
+            # print("inferencing at step: ", step_count)
             action_chunk = policy.get_action(data_point)
             for j in range(action_horizon):
                 # NOTE: concat_pred_action = action[f"action.{modality_keys[0]}"][j]
@@ -85,7 +85,10 @@ def calc_mse_for_single_trajectory(
     assert gt_action_across_time.shape == pred_action_across_time.shape
 
     # calc MSE across time
-    mse = np.mean((gt_action_across_time - pred_action_across_time) ** 2)
+    mse = min(
+        np.mean((gt_action_across_time - pred_action_across_time) ** 2),
+        np.mean((360 - gt_action_across_time - pred_action_across_time) ** 2)
+    )
     print("Unnormalized Action MSE across single traj:", mse)
 
     print("state_joints vs time", state_joints_across_time.shape)

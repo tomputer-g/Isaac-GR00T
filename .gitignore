@@ -1,3 +1,7 @@
+datasets/
+train_result/
+plot_result/
+
 # C extensions
 *.so
 
