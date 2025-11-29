@@ -32,11 +32,15 @@ from gr00t.data.transform.video import (
     VideoToTensor,
 )
 from gr00t.model.transforms import GR00TTransform
+from tqdm import tqdm
+
 REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
 
 embodiment_tag = EmbodimentTag.NEW_EMBODIMENT
-DATA_PATH = os.path.join(REPO_PATH, "datasets/kinova_dataset_nov6")
-
+# DATA_PATH = os.path.join(REPO_PATH, "datasets/kinova_dataset_nov6")
+# DATA_PATH = os.path.join(REPO_PATH, "datasets/merged_dataset_nov22_30eps")
+# DATA_PATH = os.path.join(REPO_PATH, "datasets/eval_visible_3eps/eval_3eps")
+DATA_PATH = os.path.join(REPO_PATH, "datasets/eval_occluded_9eps/eval_9eps")
 print("Loading dataset... from", DATA_PATH)
 
 # 2. modality configs
@@ -118,7 +122,7 @@ composedModalityTform = ComposedModalityTransform(transforms=transforms)
 
 train_dataset = LeRobotSingleDataset(DATA_PATH, modality_config,  embodiment_tag=embodiment_tag, transforms=composedModalityTform)
 
-finetuned_model_path = "./train_result/checkpoint-1000"
+finetuned_model_path = "./train_result/checkpoint-5000"
 finetuned_policy = Gr00tPolicy(
     model_path=finetuned_model_path,
     embodiment_tag = embodiment_tag,
@@ -129,15 +133,21 @@ finetuned_policy = Gr00tPolicy(
 
 warnings.simplefilter("ignore", category=FutureWarning)
 
-mse = calc_mse_for_single_trajectory(
-    finetuned_policy,
-    train_dataset,
-    traj_id=0,
-    modality_keys=["arm_joints", "gripper"],
-    steps=150,
-    action_horizon=16,
-    plot=True,
-    save_plot_path="./plot_result/eval.png"
-)
 
-print("MSE loss for trajectory 0:", mse)
+for traj_id in tqdm(range(len(train_dataset.trajectory_lengths))):
+    mse = calc_mse_for_single_trajectory(
+        finetuned_policy,
+        train_dataset,
+        traj_id=traj_id,
+        modality_keys=["arm_joints", "gripper"],
+        steps=150,
+        action_horizon=16,
+        plot=True,
+        save_plot_path="./plot_result/eval_{}.png".format(traj_id),
+    )
+
+    task_idx = train_dataset.get_trajectory_data(traj_id)["task_index"][0]
+    task_desc = train_dataset._tasks["task"][task_idx]
+    print("Trajectory {} task description: {}".format(traj_id, task_desc))
+
+    print("MSE loss for trajectory {}:".format(traj_id), mse)
