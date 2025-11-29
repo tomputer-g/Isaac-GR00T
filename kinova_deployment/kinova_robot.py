@@ -200,17 +200,26 @@ class KinovaGen3Robot:
                 else:
                     print(f"  ✗ Failed to open external camera")
                     self.external_camera = None
-            
-            # Wrist camera - use Kinova built-in RTSP stream
-            print("  Attempting Kinova wrist camera (RTSP)...")
-            from deploy_kinova import KinovaWristCamera
-            kinova_wrist = KinovaWristCamera(self.ip_address)
-            if kinova_wrist.open():
-                self.wrist_camera = kinova_wrist
-                print(f"  ✓ Wrist camera: Kinova RTSP (rtsp://{self.ip_address}/color)")
-            else:
-                print(f"  ✗ Kinova wrist camera not available, trying USB fallback...")
-                # Fallback to USB camera
+            try:
+                import pyrealsense2 as rs
+                ctx = rs.context()
+                devices = ctx.query_devices()
+                if len(devices) > 0:
+                    print("  Attempting RealSense for external camera...")
+                    from test_cameras_only import RealSenseCapture
+                    rs_cap = RealSenseCapture(device_index=1)
+                    if rs_cap.isOpened():
+                        self.wrist_camera = rs_cap
+                        print("  ✓ Wrist camera: RealSense")
+                    else:
+                        self.wrist_camera = None
+                else:
+                    self.wrist_camera = None
+            except Exception:
+                self.wrist_camera = None
+
+            # Fallback to OpenCV for wrist camera
+            if self.wrist_camera is None:
                 self.wrist_camera = cv2.VideoCapture(config.WRIST_CAMERA_INDEX)
                 if self.wrist_camera.isOpened():
                     self.wrist_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
@@ -220,7 +229,6 @@ class KinovaGen3Robot:
                 else:
                     print(f"  ✗ Failed to open wrist camera")
                     self.wrist_camera = None
-            
             if self.external_camera is None or self.wrist_camera is None:
                 print("⚠ Warning: Not all cameras initialized")
             else:
@@ -393,12 +401,7 @@ class KinovaGen3Robot:
         if self.wrist_camera is not None:
             ret, frame = self.wrist_camera.read()
             if ret and frame is not None and frame.size > 0:
-                # Check if frame needs BGR to RGB conversion (RTSP may already be RGB/BGR)
-                if len(frame.shape) == 3 and frame.shape[2] == 3:
-                    # Assume it's BGR from OpenCV, convert to RGB
-                    images['wrist'] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                else:
-                    images['wrist'] = frame
+                images['wrist'] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             else:
                 print("⚠ Failed to read wrist camera - returning black frame")
                 images['wrist'] = np.zeros((config.CAMERA_HEIGHT, config.CAMERA_WIDTH, 3), dtype=np.uint8)
