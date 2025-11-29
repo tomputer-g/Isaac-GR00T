@@ -1,3 +1,8 @@
+datasets/
+3dgs_checkpoints/
+plot_result/ 
+train_result/
+
 # C extensions
 *.so
 
