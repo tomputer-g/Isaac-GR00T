@@ -38,7 +38,7 @@ print("Loading dataset... from", DATA_PATH)
 
 # 2. modality configs
 
-video_keys = ["video.external"] #, "video.wrist"]
+video_keys = ["video.external", "video.wrist"]
 state_keys = ["state.arm_joints", "state.gripper"]
 action_keys = ["action.arm_joints", "action.gripper"]
 language_keys = ["annotation.human.task_description"]
