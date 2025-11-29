@@ -185,6 +185,11 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.input_embedding_dim,
         )
+        self.goal_encoder = nn.Sequential(
+            nn.Linear(4, config.input_embedding_dim),
+            nn.ReLU(),
+            nn.Linear(config.input_embedding_dim, config.input_embedding_dim),
+        )
         self.action_encoder = MultiEmbodimentActionEncoder(
             action_dim=config.action_dim,
             hidden_size=self.input_embedding_dim,
@@ -224,6 +229,7 @@ class FlowmatchingActionHead(nn.Module):
             p.requires_grad = True
         if not tune_projector:
             self.state_encoder.requires_grad_(False)
+            self.goal_encoder.requires_grad_(False)
             self.action_encoder.requires_grad_(False)
             self.action_decoder.requires_grad_(False)
             if self.config.add_pos_embed:
@@ -305,6 +311,12 @@ class FlowmatchingActionHead(nn.Module):
         # Embed state.
         state_features = self.state_encoder(action_input.state, embodiment_id)
 
+        batch_size = state_features.shape[0]
+        goal_3d = action_input.get("goal_3d", torch.zeros(batch_size, 3, device=device, dtype=torch.float32))
+        goal_visible = action_input.get("goal_visible", torch.ones(batch_size, 1, device=device, dtype=torch.float32))
+        goal_input = torch.cat([goal_3d, goal_visible], dim=-1)
+        goal_token = self.goal_encoder(goal_input).unsqueeze(1)
+
         # Embed noised action trajectory.
         actions = action_input.action
         noise = torch.randn(actions.shape, device=actions.device, dtype=actions.dtype)
@@ -324,9 +336,9 @@ class FlowmatchingActionHead(nn.Module):
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
 
-        # Join vision, language, state and action embedding along sequence dimension.
+        # Join vision, language, state, goal and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+        sa_embs = torch.cat((state_features, goal_token, future_tokens, action_features), dim=1)
 
         vl_attn_mask = backbone_output.backbone_attention_mask
 

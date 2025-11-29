@@ -16,6 +16,7 @@
 import random
 import re
 from typing import Any, Dict, List, Optional
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -76,6 +77,8 @@ def collate(features: List[dict], eagle_processor) -> dict:
         elif key in ("pixel_values", "image_grid_thw", "attention_mask", "input_ids"):
             # Concat in existing batch dimension.
             batch[key] = torch.cat(values)
+        elif key in ("goal_3d", "goal_visible"):
+            batch[key] = torch.from_numpy(np.stack(values))
         else:
             # state, state_mask, action and action_mask.
             # Stack to form the batch dimension.
@@ -113,8 +116,16 @@ class GR00TTransform(InvertibleModalityTransform):
 
     # Private attributes to keep track of shapes/dimensions across apply/unapply
     _language_key: Optional[list[str]] = PrivateAttr(default=None)
+    _gs_map_means: Optional[torch.Tensor] = PrivateAttr(default=None)
+    _gs_map_clip_embeds: Optional[torch.Tensor] = PrivateAttr(default=None)
+    _gs_clip_decoder: Optional[torch.nn.Module] = PrivateAttr(default=None)
+    _gs_clip_model: Optional[Any] = PrivateAttr(default=None)
+    _map_to_base_transform: Optional[np.ndarray] = PrivateAttr(default=None)
 
     eagle_processor: ProcessorMixin = Field(default=build_eagle_processor(DEFAULT_EAGLE_PATH))
+    
+    gs_map_path: Optional[str] = Field(default=None)
+    map_to_base_transform_path: Optional[str] = Field(default=None)
 
     # XEmbDiT arguments
     default_instruction: str = Field(default="Perform the default behavior.")
@@ -130,6 +141,12 @@ class GR00TTransform(InvertibleModalityTransform):
         """Set the metadata for the transform."""
         super().set_metadata(dataset_metadata)
         self.embodiment_tag = dataset_metadata.embodiment_tag
+        if self.gs_map_path:
+            self._load_gs_map(self.gs_map_path)
+        if self.map_to_base_transform_path:
+            self._map_to_base_transform = np.load(self.map_to_base_transform_path)
+        elif self._map_to_base_transform is None:
+            self._map_to_base_transform = np.eye(4)
 
     def get_embodiment_tag(self) -> int:
         """Get the embodiment tag from the data."""
@@ -137,6 +154,99 @@ class GR00TTransform(InvertibleModalityTransform):
             self.embodiment_tag is not None
         ), "Embodiment tag not set. Please call set_metadata first."
         return self.embodiment_tag_mapping[self.embodiment_tag.value]
+
+    def _load_gs_map(self, map_path: str):
+        map_path = Path(map_path)
+        if map_path.suffix == '.ply':
+            try:
+                import open3d as o3d
+                pcd = o3d.io.read_point_cloud(str(map_path))
+                points = np.asarray(pcd.points)
+                if hasattr(pcd, 'clip_embeds'):
+                    clip_embeds = np.asarray(pcd.clip_embeds)
+                else:
+                    clip_embeds_path = map_path.parent / (map_path.stem + "_clip_embeds.npy")
+                    if clip_embeds_path.exists():
+                        clip_embeds = np.load(clip_embeds_path)
+                    else:
+                        clip_embeds = None
+                
+                self._gs_map_means = torch.from_numpy(points).float()
+                if clip_embeds is not None:
+                    self._gs_map_clip_embeds = torch.from_numpy(clip_embeds).float()
+                    clip_decoder_path = map_path.parent / (map_path.stem + "_clip_decoder.pth")
+                    if clip_decoder_path.exists():
+                        self._gs_clip_decoder = torch.load(clip_decoder_path, map_location='cpu')
+                        self._gs_clip_decoder.eval()
+            except ImportError:
+                pass
+        elif map_path.suffix == '.npz':
+            data = np.load(map_path)
+            self._gs_map_means = torch.from_numpy(data['means']).float()
+            if 'clip_embeds' in data:
+                self._gs_map_clip_embeds = torch.from_numpy(data['clip_embeds']).float()
+        else:
+            data = np.load(map_path, allow_pickle=True).item()
+            self._gs_map_means = torch.from_numpy(data['means']).float()
+            if 'clip_embeds' in data:
+                self._gs_map_clip_embeds = torch.from_numpy(data['clip_embeds']).float()
+            if 'clip_decoder' in data:
+                self._gs_clip_decoder = data['clip_decoder']
+                if isinstance(self._gs_clip_decoder, torch.nn.Module):
+                    self._gs_clip_decoder.eval()
+        
+        if self._gs_map_means is not None and self._gs_clip_decoder is None:
+            try:
+                from sagesplat.clip.clip import load
+                self._gs_clip_model, _ = load("ViT-B/32", device='cpu')
+                self._gs_clip_model.eval()
+            except ImportError:
+                pass
+
+    def _query_gs_map(self, text_prompt: str) -> Optional[np.ndarray]:
+        if self._gs_map_means is None or self._gs_map_clip_embeds is None:
+            return None
+        
+        try:
+            from sagesplat.clip.clip import tokenize
+            if self._gs_clip_model is None:
+                from sagesplat.clip.clip import load
+                self._gs_clip_model, _ = load("ViT-B/32", device='cpu')
+                self._gs_clip_model.eval()
+            
+            tokens = tokenize([text_prompt])
+            with torch.no_grad():
+                text_embed = self._gs_clip_model.encode_text(tokens).float()
+                text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
+            
+            clip_embeds = self._gs_map_clip_embeds
+            if self._gs_clip_decoder is not None:
+                with torch.no_grad():
+                    clip_embeds = self._gs_clip_decoder(clip_embeds.view(-1, clip_embeds.shape[-1]))
+                    clip_embeds = clip_embeds.view(*self._gs_map_clip_embeds.shape[:-1], -1)
+            
+            clip_embeds_norm = clip_embeds / (clip_embeds.norm(dim=-1, keepdim=True) + 1e-8)
+            similarities = (clip_embeds_norm @ text_embed.T).squeeze()
+            
+            top_k = min(1000, len(similarities))
+            _, indices = torch.topk(similarities, top_k)
+            mask = torch.zeros_like(similarities, dtype=torch.bool)
+            mask[indices] = True
+            
+            relevant_means = self._gs_map_means[mask]
+            if len(relevant_means) == 0:
+                return None
+            
+            goal_3d_map = relevant_means.mean(dim=0).numpy()
+            
+            if self._map_to_base_transform is not None:
+                goal_homogeneous = np.append(goal_3d_map, 1.0)
+                goal_base_homogeneous = self._map_to_base_transform @ goal_homogeneous
+                return goal_base_homogeneous[:3]
+            
+            return goal_3d_map
+        except Exception:
+            return None
 
     def check_keys_and_batch_size(self, data):
         grouped_keys = {}
@@ -237,6 +347,15 @@ class GR00TTransform(InvertibleModalityTransform):
             raw_language = self.default_instruction
         return raw_language
 
+    def _extract_goal_from_prompt(self, prompt: str) -> Optional[str]:
+        if "place" in prompt.lower() or "on" in prompt.lower():
+            parts = prompt.lower().split(" on ")
+            if len(parts) > 1:
+                goal_part = parts[-1].strip()
+                if goal_part:
+                    return goal_part
+        return None
+
     def _prepare_state(self, data: dict):
         """
         Gathers final state from data['state'], then pads to max_state_dim.
@@ -312,6 +431,25 @@ class GR00TTransform(InvertibleModalityTransform):
         state, state_mask, _ = self._prepare_state(data)
         transformed_data["state"] = state
         transformed_data["state_mask"] = state_mask
+
+        if "map_to_base_transform" in data:
+            self._map_to_base_transform = np.array(data["map_to_base_transform"], dtype=np.float32)
+
+        goal_3d = None
+        goal_visible = np.array([1.0], dtype=np.float32)
+        if self._gs_map_means is not None:
+            goal_text = self._extract_goal_from_prompt(language)
+            if goal_text:
+                goal_3d = self._query_gs_map(goal_text)
+            if goal_3d is None:
+                goal_3d = np.zeros(3, dtype=np.float32)
+                goal_visible = np.array([0.0], dtype=np.float32)
+        else:
+            goal_3d = data.get("goal_3d", np.zeros(3, dtype=np.float32))
+            goal_visible = data.get("goal_visible", np.array([1.0], dtype=np.float32))
+        
+        transformed_data["goal_3d"] = np.array(goal_3d, dtype=np.float32)
+        transformed_data["goal_visible"] = np.array(goal_visible, dtype=np.float32)
 
         if self.training:
             # 3) Prepare actions
