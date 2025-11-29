@@ -204,6 +204,9 @@ class GR00TTransform(InvertibleModalityTransform):
                 pass
 
     def _query_gs_map(self, text_prompt: str) -> Optional[np.ndarray]:
+        """
+            Used for 3DGS updated architecture.
+        """
         if self._gs_map_means is None or self._gs_map_clip_embeds is None:
             return None
         

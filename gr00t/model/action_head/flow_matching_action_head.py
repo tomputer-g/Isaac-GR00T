@@ -185,6 +185,7 @@ class FlowmatchingActionHead(nn.Module):
             hidden_dim=self.hidden_size,
             output_dim=self.input_embedding_dim,
         )
+        # converts the goal state gaussian embedding vector to goal token to concat with output of action head
         self.goal_encoder = nn.Sequential(
             nn.Linear(4, config.input_embedding_dim),
             nn.ReLU(),
