@@ -57,7 +57,7 @@ JOINT_LIMITS = {
 
 # Safety margins (degrees) - reduce range for safety
 # Full rotation joints (1,2,4) use smaller margin, limited joints use 10°
-SAFETY_MARGIN = 2.0  # Reduced for full-rotation joints
+SAFETY_MARGIN = 0.0  # Reduced for full-rotation joints
 
 # Maximum velocity/acceleration limits
 MAX_JOINT_VELOCITY = 20.0  # degrees/sec

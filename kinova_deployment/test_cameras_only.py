@@ -59,7 +59,8 @@ class KinovaWristCamera:
             
             # Set options for better stability
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            self.cap.set(cv2.CAP_PROP_FPS, 10)
+            
             
             if not self.cap.isOpened():
                 print("  ✗ Failed to open RTSP stream")
