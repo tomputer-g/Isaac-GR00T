@@ -32,9 +32,12 @@ Usage:
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
+from multiprocessing import Process, Queue
+from queue import Empty
 
 import cv2
 import numpy as np
@@ -132,7 +135,7 @@ def main():
     parser.add_argument(
         "--steps",
         type=int,
-        default=100,
+        default=300,
         help="Number of control steps to execute (default: 100)"
     )
     parser.add_argument(
@@ -144,7 +147,7 @@ def main():
     parser.add_argument(
         "--actions_per_step",
         type=int,
-        default=4,
+        default=16,
         help="Number of actions to execute per step (default: 4)"
     )
     parser.add_argument(
