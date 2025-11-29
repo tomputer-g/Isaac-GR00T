@@ -1,6 +1,7 @@
 datasets/
 train_result/
 plot_result/
+3dgs_checkpoints/
 
 # C extensions
 *.so

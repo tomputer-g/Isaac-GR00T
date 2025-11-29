@@ -32,7 +32,7 @@ from gr00t.model.transforms import GR00TTransform
 # REPO_PATH is the path of the pip install gr00t repo and one level up
 REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
 # DATA_PATH = os.path.join(REPO_PATH, "datasets/kinova_dataset_nov6")
-DATA_PATH = os.path.join(REPO_PATH, "datasets/visible+bowl_36eps")
+DATA_PATH = os.path.join(REPO_PATH, "datasets/train_nov29")
 
 print("Loading dataset... from", DATA_PATH)
 
@@ -120,15 +120,6 @@ embodiment_tag = EmbodimentTag.NEW_EMBODIMENT
 
 # load the dataset
 train_dataset = LeRobotSingleDataset(DATA_PATH, modality_config,  embodiment_tag=embodiment_tag, transforms=composedModalityTform)
-#print(train_dataset[0].keys())
-#print(train_dataset[0].values())
-
-# print the 7th data point
-#resp = train_dataset[7]
-#any_describe(resp)
-#print(resp.keys())
-#exit(0)
-
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
