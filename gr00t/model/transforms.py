@@ -185,6 +185,49 @@ class GR00TTransform(InvertibleModalityTransform):
             self._gs_map_means = torch.from_numpy(data['means']).float()
             if 'clip_embeds' in data:
                 self._gs_map_clip_embeds = torch.from_numpy(data['clip_embeds']).float()
+        elif map_path.suffix in ['.ckpt', '.pth', '.tar']:
+            checkpoint = torch.load(map_path, map_location='cpu')
+            
+            state_dict = checkpoint
+            if 'pipeline' in checkpoint:
+                pipeline_state = checkpoint['pipeline']
+                if isinstance(pipeline_state, dict) and 'model' in pipeline_state:
+                    state_dict = pipeline_state['model']
+                else:
+                    state_dict = pipeline_state
+            elif 'model' in checkpoint:
+                state_dict = checkpoint['model']
+            
+            means_key = 'gauss_params.means'
+            if means_key not in state_dict:
+                means_key = 'means'
+            
+            clip_key = 'gauss_params.clip_embeds'
+            if clip_key not in state_dict:
+                clip_key = 'clip_embeds'
+            
+            if means_key in state_dict:
+                means_tensor = state_dict[means_key]
+                if isinstance(means_tensor, torch.Tensor):
+                    self._gs_map_means = means_tensor.cpu().float()
+                else:
+                    self._gs_map_means = torch.from_numpy(np.array(means_tensor)).float()
+            
+            if clip_key in state_dict:
+                clip_tensor = state_dict[clip_key]
+                if isinstance(clip_tensor, torch.Tensor):
+                    self._gs_map_clip_embeds = clip_tensor.cpu().float()
+                else:
+                    self._gs_map_clip_embeds = torch.from_numpy(np.array(clip_tensor)).float()
+            
+            decoder_key = 'gauss_params.clip_decoder'
+            if decoder_key not in state_dict:
+                decoder_key = 'clip_decoder'
+            
+            if decoder_key in state_dict:
+                self._gs_clip_decoder = state_dict[decoder_key]
+                if isinstance(self._gs_clip_decoder, torch.nn.Module):
+                    self._gs_clip_decoder.eval()
         else:
             data = np.load(map_path, allow_pickle=True).item()
             self._gs_map_means = torch.from_numpy(data['means']).float()
