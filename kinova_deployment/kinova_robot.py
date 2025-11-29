@@ -251,15 +251,9 @@ class KinovaGen3Robot:
             joint_angles = []
             for actuator in feedback.actuators[:6]:  # First 6 are arm joints
                 joint_angles.append(actuator.position)
-            
-            # Get gripper position (convert from 0-1 to 0-100)
-            try:
-                gripper_request = Base_pb2.GripperRequest()
-                gripper_feedback = self.base.GetMeasuredGripperMovement(gripper_request)
-                gripper_position = gripper_feedback.finger[0].value * 100.0
-            except Exception as grip_err:
-                print(f"Warning: Could not read gripper position: {grip_err}")
-                gripper_position = 50.0  # Default to middle position
+        
+            # Get gripper position
+            gripper_position = feedback.interconnect.gripper_feedback.motor[0].position
             
             state = np.array(joint_angles + [gripper_position], dtype=np.float32)
             return state
