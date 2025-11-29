@@ -31,24 +31,33 @@ Usage:
     python kinova_client.py --host 192.168.1.100 --port 5555 --task "pick up the object"
 """
 
-import argparse
-import os
+# Add parent directory to path for imports
 import sys
 import time
 from pathlib import Path
-from multiprocessing import Process, Queue
-from queue import Empty
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import argparse
 
 import cv2
 import numpy as np
 from tqdm import tqdm
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from gr00t.eval.robot import RobotInferenceClient
 from kinova_deployment.kinova_robot import KinovaGen3Robot
 import kinova_deployment.config as config
+
+import matplotlib.pyplot as plt
+
+# Setup figure once (before loop)
+plt.ion()  # Interactive mode for continuous updates
+fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+ax.set_title("Random frame")
+# # Create and setup OpenCV window
+# window_name = "Camera View"
+# cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+# cv2.resizeWindow(window_name, 1280, 480)
+
+from gr00t.eval.robot import RobotInferenceClient # Import delays cause CV2 to crash / segfault.
 
 
 class KinovaPolicyClient:
@@ -247,6 +256,31 @@ def main():
                 images = robot.get_camera_images()
                 state = robot.get_joint_states()
                 
+                external_frame = images["external"]
+                wrist_frame = images["wrist"]
+                # Resize frames to same height for side-by-side display
+                h = min(external_frame.shape[0], wrist_frame.shape[0])
+                external_resized = cv2.resize(external_frame, 
+                                                (int(external_frame.shape[1] * h / external_frame.shape[0]), h))
+                wrist_resized = cv2.resize(wrist_frame, 
+                                            (int(wrist_frame.shape[1] * h / wrist_frame.shape[0]), h))
+                
+                # Add labels
+                cv2.putText(external_resized, "External View", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                cv2.putText(wrist_resized, "Wrist View", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                cv2display = np.hstack([external_resized, wrist_resized])
+                # cv2.imshow(window_name, cv2display)
+                # cv2.waitKey(1)  # 1m`s delay, non-blocking
+                # Update display
+                ax.clear()
+                ax.imshow(cv2display)
+                ax.set_title("Random frame")
+                plt.pause(0.01)  # Refresh every 10ms (~100 FPS)
+                plt.draw()
+
                 # Get action from policy server
                 start_time = time.time()
                 action = policy_client.get_action(
