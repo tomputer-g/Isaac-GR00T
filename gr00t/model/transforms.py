@@ -146,7 +146,7 @@ class GR00TTransform(InvertibleModalityTransform):
         if self.map_to_base_transform_path:
             self._map_to_base_transform = np.load(self.map_to_base_transform_path)
         elif self._map_to_base_transform is None:
-            self._map_to_base_transform = np.eye(4)
+            self._map_to_base_transform = np.eye(4) # TODO: this needs to be computed and replaced here
 
     def get_embodiment_tag(self) -> int:
         """Get the embodiment tag from the data."""

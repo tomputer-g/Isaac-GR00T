@@ -28,9 +28,15 @@ def action_head_pytorch_forward(self, backbone_output, action_input):
     # Embed state.
     state_features = self.state_encoder(action_input.state, embodiment_id)
 
-    # Set initial actions as the sampled noise.
+    # Encode goal token
     batch_size = vl_embs.shape[0]
     device = vl_embs.device
+    goal_3d = action_input.get("goal_3d", torch.zeros(batch_size, 3, device=device, dtype=torch.float32))
+    goal_visible = action_input.get("goal_visible", torch.ones(batch_size, 1, device=device, dtype=torch.float32))
+    goal_input = torch.cat([goal_3d, goal_visible], dim=-1)
+    goal_token = self.goal_encoder(goal_input).unsqueeze(1)
+
+    # Set initial actions as the sampled noise.
     actions = torch.randn(
         size=(batch_size, self.config.action_horizon, self.config.action_dim),
         dtype=vl_embs.dtype,
@@ -57,9 +63,9 @@ def action_head_pytorch_forward(self, backbone_output, action_input):
             pos_embs = self.position_embedding(pos_ids).unsqueeze(0)
             action_features = action_features + pos_embs
 
-        # Join vision, language, state and action embedding along sequence dimension.
+        # Join vision, language, state, goal and action embedding along sequence dimension.
         future_tokens = self.future_tokens.weight.unsqueeze(0).expand(vl_embs.shape[0], -1, -1)
-        sa_embs = torch.cat((state_features, future_tokens, action_features), dim=1)
+        sa_embs = torch.cat((state_features, goal_token, future_tokens, action_features), dim=1)
 
         # Run model forward.
         model_output = self.model(
