@@ -56,42 +56,68 @@ def test_connection():
         print(f"✓ Wrist camera: {images['wrist'].shape}")
         
         # Display camera feeds for 5 seconds
-        print("\n[4/5] Displaying camera feeds (5 seconds)...")
-        start_time = time.time()
-        while (time.time() - start_time) < 5.0:
-            images = robot.get_camera_images()
-            
-            # Combine images side by side
-            combined = np.hstack([
-                cv2.cvtColor(images['external'], cv2.COLOR_RGB2BGR),
-                cv2.cvtColor(images['wrist'], cv2.COLOR_RGB2BGR)
-            ])
-            
-            cv2.putText(
-                combined,
-                "External Camera",
-                (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-            cv2.putText(
-                combined,
-                "Wrist Camera",
-                (650, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2
-            )
-            
-            cv2.imshow("Camera Test", combined)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        print("\n[4/5] Testing camera capture (5 seconds)...")
+        print("  Note: Saving frames to disk instead of displaying to avoid OpenCV/RealSense conflicts")
         
-        cv2.destroyAllWindows()
-        print("✓ Camera test complete")
+        start_time = time.time()
+        frame_count = 0
+        save_interval = 1.0  # Save every second
+        last_save_time = start_time
+        
+        while (time.time() - start_time) < 5.0:
+            try:
+                images = robot.get_camera_images()
+                
+                # Validate images
+                if images['external'] is None or images['wrist'] is None:
+                    print("⚠ Warning: Got None image, skipping frame")
+                    time.sleep(0.033)  # ~30fps
+                    continue
+                
+                frame_count += 1
+                
+                # Save a frame every second
+                current_time = time.time()
+                if current_time - last_save_time >= save_interval:
+                    # Combine images side by side
+                    combined = np.hstack([
+                        cv2.cvtColor(images['external'], cv2.COLOR_RGB2BGR),
+                        cv2.cvtColor(images['wrist'], cv2.COLOR_RGB2BGR)
+                    ])
+                    
+                    cv2.putText(
+                        combined,
+                        "External Camera",
+                        (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 0),
+                        2
+                    )
+                    cv2.putText(
+                        combined,
+                        "Wrist Camera",
+                        (650, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 0),
+                        2
+                    )
+                    
+                    filename = f"test_robot_cameras_{int(current_time - start_time)}s.jpg"
+                    cv2.imwrite(filename, combined)
+                    print(f"  Saved: {filename}")
+                    last_save_time = current_time
+                
+                time.sleep(0.033)  # ~30fps
+                    
+            except Exception as display_err:
+                print(f"⚠ Frame capture error: {display_err}")
+                time.sleep(0.033)
+                continue
+        
+        print(f"✓ Camera test complete ({frame_count} frames captured)")
+        print("  Check test_robot_cameras_*.jpg for saved frames")
         
         # Test observation collection
         print("\n[5/5] Testing observation collection...")

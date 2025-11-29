@@ -55,6 +55,78 @@ import config
 from kinova_robot import KinovaGen3Robot
 
 
+class KinovaWristCamera:
+    """Kinova Gen3 built-in end-effector camera wrapper"""
+    
+    def __init__(self, robot_ip: str):
+        self.robot_ip = robot_ip
+        self.camera_stream = f"rtsp://{robot_ip}/color"
+        self.cap = None
+        self.frame_count = 0
+        
+    def open(self) -> bool:
+        """Open the wrist camera stream"""
+        try:
+            print(f"Opening Kinova wrist camera stream from {self.camera_stream}...")
+            
+            # Use FFMPEG backend for RTSP
+            self.cap = cv2.VideoCapture(self.camera_stream, cv2.CAP_FFMPEG)
+            
+            # Set options for better stability
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            if not self.cap.isOpened():
+                print("  ✗ Failed to open RTSP stream")
+                return False
+            
+            # Extended warmup - RTSP streams need more time
+            print("  Warming up RTSP stream (this may take 5-10 seconds)...")
+            success_count = 0
+            for i in range(60):  # Try for up to 6 seconds
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    success_count += 1
+                    if success_count >= 5:  # Need 5 successful reads
+                        print(f"  ✓ RTSP stream ready after {i+1} attempts")
+                        return True
+                time.sleep(0.1)
+            
+            print(f"  ✗ RTSP stream warmup failed (only {success_count}/5 successful reads)")
+            self.cap.release()
+            self.cap = None
+            return False
+            
+        except Exception as e:
+            print(f"Failed to open wrist camera: {e}")
+            return False
+    
+    def read(self):
+        """Read a frame from the wrist camera"""
+        if self.cap and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if ret:
+                self.frame_count += 1
+            return ret, frame
+        return False, None
+    
+    def release(self):
+        """Release the camera"""
+        if self.cap:
+            self.cap.release()
+            print(f"  Kinova wrist camera released (captured {self.frame_count} frames)")
+    
+    def isOpened(self):
+        """Check if camera is opened"""
+        return self.cap is not None and self.cap.isOpened()
+    
+    def set(self, prop, value):
+        """Set camera property (compatibility with VideoCapture API)"""
+        if self.cap:
+            return self.cap.set(prop, value)
+        return False
+
+
 class KinovaPolicyDeployer:
     """Handles policy inference and preprocessing for Kinova deployment."""
     
@@ -198,11 +270,12 @@ class KinovaPolicyDeployer:
         # Split state into arm_joints and gripper
         state = observation['observation.state']
         
+        # Add a time dimension (T=1) to match training format: (T, D) for state and (T, H, W, C) for video
         processed = {
-            'state.arm_joints': state[:6],
-            'state.gripper': state[6:7],
-            'video.external': observation['observation.images.external'],
-            'video.wrist': observation['observation.images.wrist'],
+            'state.arm_joints': np.expand_dims(state[:6], axis=0),   # (1, 6)
+            'state.gripper': np.expand_dims(state[6:7], axis=0),     # (1, 1)
+            'video.external': np.expand_dims(observation['observation.images.external'], axis=0),  # (1, H, W, C)
+            'video.wrist': np.expand_dims(observation['observation.images.wrist'], axis=0),        # (1, H, W, C)
         }
         
         return processed
@@ -220,15 +293,123 @@ class KinovaPolicyDeployer:
         """
         # Preprocess observation
         processed_obs = self.preprocess_observation(observation)
+        # Inject language instruction into processed observation under expected key
+        # Use list so transforms handle it correctly
+        processed_obs["annotation.human.task_description"] = [language_instruction]
         
-        # Get action from policy
-        # Note: The policy expects a specific format, and returns normalized actions
-        action_chunk = self.policy.get_action(
-            observation=processed_obs,
-            language_instruction=language_instruction
-        )
-        
-        return action_chunk
+        # Prepare observation for policy exactly like Gr00tPolicy.get_action does
+        obs_copy = processed_obs.copy()
+        # If not batched, add a batch dim (B=1) for all array-like fields
+        try:
+            # Use the policy helper to detect batching
+            is_batch = self.policy._check_state_is_batched(obs_copy)
+        except Exception:
+            # Fallback: treat as not batched
+            is_batch = False
+
+        if not is_batch:
+            # Unsqueeze values to add batch dim in the same way policy does
+            from gr00t.model.policy import unsqueeze_dict_values
+
+            obs_copy = unsqueeze_dict_values(obs_copy)
+
+        # Ensure lists are converted to numpy arrays (e.g., language lists)
+        for k, v in list(obs_copy.items()):
+            if not isinstance(v, np.ndarray) and not isinstance(v, torch.Tensor):
+                try:
+                    obs_copy[k] = np.array(v)
+                except Exception:
+                    obs_copy[k] = v
+
+        # Apply policy transforms (policy expects batched inputs here)
+        normalized_input = self.policy.apply_transforms(obs_copy)
+
+        # Convert any PIL Image objects to numpy arrays (defensive)
+        try:
+            from PIL import Image as PILImageModule
+            PILImageClass = getattr(PILImageModule, 'Image', PILImageModule)
+            if not isinstance(PILImageClass, type) and hasattr(PILImageModule, 'Image'):
+                PILImageClass = getattr(PILImageModule, 'Image')
+        except Exception:
+            PILImageClass = None
+
+        def _convert_images(obj):
+            if PILImageClass is not None and isinstance(obj, PILImageClass):
+                try:
+                    return np.asarray(obj)
+                except Exception:
+                    return obj
+            if isinstance(obj, dict):
+                return {k: _convert_images(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_convert_images(v) for v in obj]
+            if isinstance(obj, tuple):
+                return tuple(_convert_images(v) for v in obj)
+            return obj
+
+        normalized_input = _convert_images(normalized_input)
+
+        # Debug: optionally print a brief summary of normalized_input structure to locate bad types
+        import os
+        if os.environ.get("GR00T_DEBUG", "0") == "1":
+            def _summarize(obj, path=""):
+                lines = []
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        lines.extend(_summarize(v, path + "/" + str(k)))
+                elif isinstance(obj, list) or isinstance(obj, tuple):
+                    for i, v in enumerate(obj):
+                        lines.extend(_summarize(v, path + f"/{i}"))
+                else:
+                    t = type(obj)
+                    if isinstance(obj, np.ndarray):
+                        lines.append((path, "ndarray", str(obj.dtype), obj.shape))
+                    elif isinstance(obj, torch.Tensor):
+                        lines.append((path, "tensor", str(obj.dtype), tuple(obj.shape)))
+                    elif isinstance(obj, str):
+                        lines.append((path, "str", str(len(obj))))
+                    else:
+                        lines.append((path, t.__name__))
+                return lines
+
+            summary = _summarize(normalized_input)
+            print("[GR00T_DEBUG] normalized_input summary (first 80 entries):")
+            for s in summary[:80]:
+                print(" ", s)
+
+        # Get normalized tensor from model
+        normalized_tensor = self.policy._get_action_from_normalized_input(normalized_input)
+
+        # Convert normalized tensor -> unnormalized action dict using policy's unapply transforms
+        unnormalized_action = self.policy._get_unnormalized_action(normalized_tensor)
+
+        # If we added a batch dim earlier, remove it using policy helper
+        try:
+            from gr00t.model.policy import squeeze_dict_values
+        except Exception:
+            squeeze_dict_values = None
+
+        if not is_batch and squeeze_dict_values is not None:
+            try:
+                unnormalized_action = squeeze_dict_values(unnormalized_action)
+            except Exception:
+                pass
+
+        # Extract action array
+        action_arr = unnormalized_action.get('action') if isinstance(unnormalized_action, dict) else unnormalized_action
+
+        # Convert torch.Tensor -> numpy if needed
+        if isinstance(action_arr, torch.Tensor):
+            action_np = action_arr.detach().cpu().numpy()
+        else:
+            action_np = np.array(action_arr)
+
+        # If batch dim exists and B==1, squeeze it
+        if action_np.ndim == 3 and action_np.shape[0] == 1:
+            action_np = action_np[0]
+
+        # At this point action_np should have shape (action_horizon, action_dim==7)
+        return action_np
     
     def denormalize_action(self, normalized_action: np.ndarray) -> np.ndarray:
         """

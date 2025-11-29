@@ -24,7 +24,7 @@ from typing import Dict, Optional, Tuple
 try:
     from kortex_api.autogen.client_stubs.BaseClientRpc import BaseClient
     from kortex_api.autogen.client_stubs.BaseCyclicClientRpc import BaseCyclicClient
-    from kortex_api.autogen.messages import Base_pb2, BaseCyclic_pb2
+    from kortex_api.autogen.messages import Base_pb2, BaseCyclic_pb2, Session_pb2
     from kortex_api.TCPTransport import TCPTransport
     from kortex_api.RouterClient import RouterClient, RouterClientSendOptions
     from kortex_api.SessionManager import SessionManager
@@ -89,22 +89,27 @@ class KinovaGen3Robot:
             print(f"Connecting to robot at {self.ip_address}:{self.port}...")
             
             # Create connection
-            self.router = RouterClient(TCPTransport(), RouterClient.ROUTER_ADDRESS, self.port)
+            # Setup transport and router
+            self.transport = TCPTransport()
+            self.transport.connect(self.ip_address, self.port)
+            self.router = RouterClient(self.transport)
             
-            # Create session
-            session_info = SessionManager.CreateRouterSession(
-                self.username,
-                self.password,
-                self.ip_address,
-                self.port
-            )
+            # Create session via SessionManager
+            session_info = Session_pb2.CreateSessionInfo()
+            session_info.username = self.username
+            session_info.password = self.password
+            session_info.session_inactivity_timeout = 60000
+            session_info.connection_inactivity_timeout = 2000
             
+            session_manager = SessionManager(self.router)
+            session_manager.CreateSession(session_info)
+
             # Create base client for high-level control
             self.base = BaseClient(self.router)
-            
+
             # Create base cyclic client for real-time feedback
             self.base_cyclic = BaseCyclicClient(self.router)
-            
+
             self.is_connected = True
             print("Connected to Kinova Gen3")
             
@@ -138,10 +143,14 @@ class KinovaGen3Robot:
             self.wrist_camera = None
         
         # Disconnect from robot
-        if self.router is not None:
-            self.router.disconnect()
-            self.router = None
+        if self.transport is not None:
+            try:
+                self.transport.disconnect()
+            except Exception:
+                pass
+            self.transport = None
         
+        self.router = None
         self.base = None
         self.base_cyclic = None
         self.is_connected = False
@@ -157,25 +166,70 @@ class KinovaGen3Robot:
             self.disconnect()
     
     def _setup_cameras(self):
-        """Initialize USB cameras."""
+        """Initialize cameras with robust fallback logic."""
         try:
             print("Setting up cameras...")
             
-            # External camera
-            self.external_camera = cv2.VideoCapture(config.EXTERNAL_CAMERA_INDEX)
-            self.external_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-            self.external_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-            self.external_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+            # External camera - use RealSense if available
+            try:
+                import pyrealsense2 as rs
+                ctx = rs.context()
+                devices = ctx.query_devices()
+                if len(devices) > 0:
+                    print("  Attempting RealSense for external camera...")
+                    from test_cameras_only import RealSenseCapture
+                    rs_cap = RealSenseCapture(device_index=0)
+                    if rs_cap.isOpened():
+                        self.external_camera = rs_cap
+                        print("  ✓ External camera: RealSense")
+                    else:
+                        self.external_camera = None
+                else:
+                    self.external_camera = None
+            except Exception:
+                self.external_camera = None
             
-            # Wrist camera
-            self.wrist_camera = cv2.VideoCapture(config.WRIST_CAMERA_INDEX)
-            self.wrist_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-            self.wrist_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-            self.wrist_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+            # Fallback to OpenCV for external camera
+            if self.external_camera is None:
+                self.external_camera = cv2.VideoCapture(config.EXTERNAL_CAMERA_INDEX)
+                if self.external_camera.isOpened():
+                    self.external_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+                    self.external_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+                    self.external_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+                    print(f"  ✓ External camera: USB index {config.EXTERNAL_CAMERA_INDEX}")
+                else:
+                    print(f"  ✗ Failed to open external camera")
+                    self.external_camera = None
             
-            print("Cameras initialized")
+            # Wrist camera - use Kinova built-in RTSP stream
+            print("  Attempting Kinova wrist camera (RTSP)...")
+            from deploy_kinova import KinovaWristCamera
+            kinova_wrist = KinovaWristCamera(self.ip_address)
+            if kinova_wrist.open():
+                self.wrist_camera = kinova_wrist
+                print(f"  ✓ Wrist camera: Kinova RTSP (rtsp://{self.ip_address}/color)")
+            else:
+                print(f"  ✗ Kinova wrist camera not available, trying USB fallback...")
+                # Fallback to USB camera
+                self.wrist_camera = cv2.VideoCapture(config.WRIST_CAMERA_INDEX)
+                if self.wrist_camera.isOpened():
+                    self.wrist_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+                    self.wrist_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+                    self.wrist_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+                    print(f"  ✓ Wrist camera: USB index {config.WRIST_CAMERA_INDEX}")
+                else:
+                    print(f"  ✗ Failed to open wrist camera")
+                    self.wrist_camera = None
+            
+            if self.external_camera is None or self.wrist_camera is None:
+                print("⚠ Warning: Not all cameras initialized")
+            else:
+                print("✓ All cameras initialized")
+                
         except Exception as e:
             print(f"Failed to setup cameras: {e}")
+            import traceback
+            traceback.print_exc()
             self.external_camera = None
             self.wrist_camera = None
     
@@ -199,16 +253,21 @@ class KinovaGen3Robot:
                 joint_angles.append(actuator.position)
             
             # Get gripper position (convert from 0-1 to 0-100)
-            gripper_feedback = self.base.GetMeasuredGripperMovement()
-            gripper_position = gripper_feedback.finger[0].value * 100.0
+            try:
+                gripper_request = Base_pb2.GripperRequest()
+                gripper_feedback = self.base.GetMeasuredGripperMovement(gripper_request)
+                gripper_position = gripper_feedback.finger[0].value * 100.0
+            except Exception as grip_err:
+                print(f"Warning: Could not read gripper position: {grip_err}")
+                gripper_position = 50.0  # Default to middle position
             
             state = np.array(joint_angles + [gripper_position], dtype=np.float32)
             return state
             
         except Exception as e:
             print(f"Error reading joint states: {e}")
-            # Return zeros as fallback
-            return np.zeros(7, dtype=np.float32)
+            # Return zeros as fallback with safe gripper position
+            return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 50.0], dtype=np.float32)
     
     def send_joint_positions(self, target_positions: np.ndarray, blocking: bool = False):
         """
@@ -237,7 +296,8 @@ class KinovaGen3Robot:
             
             # Create reach joint angles action
             reach_joint_angles = action.reach_joint_angles
-            reach_joint_angles.joint_angles.joint_angles.clear()
+            # Clear the list properly for protobuf repeated fields
+            del reach_joint_angles.joint_angles.joint_angles[:]
             
             for i in range(6):
                 joint_angle = reach_joint_angles.joint_angles.joint_angles.add()
@@ -326,23 +386,30 @@ class KinovaGen3Robot:
         
         if self.external_camera is not None:
             ret, frame = self.external_camera.read()
-            if ret:
+            if ret and frame is not None and frame.size > 0:
                 # Convert BGR to RGB
                 images['external'] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             else:
-                print("Failed to read external camera")
+                print("⚠ Failed to read external camera - returning black frame")
                 images['external'] = np.zeros((config.CAMERA_HEIGHT, config.CAMERA_WIDTH, 3), dtype=np.uint8)
         else:
+            print("⚠ External camera not initialized - returning black frame")
             images['external'] = np.zeros((config.CAMERA_HEIGHT, config.CAMERA_WIDTH, 3), dtype=np.uint8)
         
         if self.wrist_camera is not None:
             ret, frame = self.wrist_camera.read()
-            if ret:
-                images['wrist'] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            if ret and frame is not None and frame.size > 0:
+                # Check if frame needs BGR to RGB conversion (RTSP may already be RGB/BGR)
+                if len(frame.shape) == 3 and frame.shape[2] == 3:
+                    # Assume it's BGR from OpenCV, convert to RGB
+                    images['wrist'] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                else:
+                    images['wrist'] = frame
             else:
-                print("Failed to read wrist camera")
+                print("⚠ Failed to read wrist camera - returning black frame")
                 images['wrist'] = np.zeros((config.CAMERA_HEIGHT, config.CAMERA_WIDTH, 3), dtype=np.uint8)
         else:
+            print("⚠ Wrist camera not initialized - returning black frame")
             images['wrist'] = np.zeros((config.CAMERA_HEIGHT, config.CAMERA_WIDTH, 3), dtype=np.uint8)
         
         return images
@@ -376,7 +443,7 @@ class KinovaGen3Robot:
             180.0,  # joint_4
             315.0,  # joint_5
             120.0,  # joint_6
-            0.0     # gripper (open)
+            50.0    # gripper (middle position - safe range is 5-95)
         ], dtype=np.float32)
         
         print("Moving to home position...")

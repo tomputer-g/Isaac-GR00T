@@ -23,7 +23,7 @@ pip install opencv-python
 Edit `config.py` and set your robot's IP address:
 
 ```python
-ROBOT_IP = "192.168.1.10"  # Change to your robot's IP
+ROBOT_IP = "192.168.2.9"
 ```
 
 Also configure camera indices if needed:

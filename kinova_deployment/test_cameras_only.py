@@ -23,8 +23,289 @@ NO robot connection, NO physical movement.
 import time
 import cv2
 import numpy as np
+import os
+import glob
+import pwd
+import grp
+import getpass
 
 import config
+
+
+# Optional RealSense support
+try:
+    import pyrealsense2 as rs
+    REALSENSE_AVAILABLE = True
+except Exception:
+    rs = None
+    REALSENSE_AVAILABLE = False
+
+
+class KinovaWristCamera:
+    """Kinova Gen3 built-in end-effector camera via RTSP"""
+    
+    def __init__(self, robot_ip: str):
+        self.robot_ip = robot_ip
+        self.camera_stream = f"rtsp://{robot_ip}/color"
+        self.cap = None
+        
+    def open(self) -> bool:
+        """Open the wrist camera stream"""
+        try:
+            print(f"Opening Kinova wrist camera stream from {self.camera_stream}...")
+            
+            # Use FFMPEG backend for RTSP
+            self.cap = cv2.VideoCapture(self.camera_stream, cv2.CAP_FFMPEG)
+            
+            # Set options for better stability
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            self.cap.set(cv2.CAP_PROP_FPS, 30)
+            
+            if not self.cap.isOpened():
+                print("  ✗ Failed to open RTSP stream")
+                return False
+            
+            # Extended warmup - RTSP streams need more time
+            print("  Warming up RTSP stream (this may take 5-10 seconds)...")
+            success_count = 0
+            for i in range(60):  # Try for up to 6 seconds
+                ret, frame = self.cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    success_count += 1
+                    if success_count >= 5:  # Need 5 successful reads
+                        print(f"  ✓ RTSP stream ready after {i+1} attempts")
+                        print("✓ Kinova wrist camera opened successfully")
+                        return True
+                time.sleep(0.1)
+            
+            print(f"  ✗ RTSP stream warmup failed (only {success_count}/5 successful reads)")
+            self.cap.release()
+            self.cap = None
+            return False
+            
+        except Exception as e:
+            print(f"Failed to open wrist camera: {e}")
+            return False
+    
+    def read(self):
+        """Read a frame from the wrist camera"""
+        if self.cap and self.cap.isOpened():
+            return self.cap.read()
+        return False, None
+    
+    def release(self):
+        """Release the camera"""
+        if self.cap:
+            self.cap.release()
+    
+    def isOpened(self):
+        """Check if camera is opened"""
+        return self.cap is not None and self.cap.isOpened()
+    
+    def set(self, prop, value):
+        """Set camera property (compatibility with VideoCapture API)"""
+        if self.cap:
+            return self.cap.set(prop, value)
+        return False
+
+
+class RealSenseCapture:
+    """Simple wrapper to provide a VideoCapture-like interface for Intel RealSense color stream.
+
+    Usage: cap = RealSenseCapture(device_index=0, width=640, height=480, fps=30)
+    Methods: isOpened(), read() -> (ret, frame), release(), set(prop, value)
+    """
+    def __init__(self, device_index=0, width=None, height=None, fps=None):
+        if not REALSENSE_AVAILABLE:
+            self._ok = False
+            return
+        try:
+            self._ctx = rs.context()
+            devices = self._ctx.query_devices()
+            if len(devices) == 0:
+                self._ok = False
+                return
+            # choose device by index
+            if device_index < len(devices):
+                dev = devices[device_index]
+            else:
+                dev = devices[0]
+            self._serial = dev.get_info(rs.camera_info.serial_number)
+
+            self._pipeline = rs.pipeline()
+            self._config = rs.config()
+            self._config.enable_device(self._serial)
+
+            # store properties so set() can update them
+            self._width = int(width) if width is not None else int(config.CAMERA_WIDTH)
+            self._height = int(height) if height is not None else int(config.CAMERA_HEIGHT)
+            self._fps = int(fps) if fps is not None else int(config.CAMERA_FPS)
+
+            self._config.enable_stream(rs.stream.color, self._width, self._height, rs.format.bgr8, self._fps)
+            self._pipeline.start(self._config)
+            self._ok = True
+        except Exception as e:
+            print(f"RealSense init failed: {e}")
+            self._ok = False
+
+    def isOpened(self):
+        return getattr(self, "_ok", False)
+
+    def set(self, prop, value):
+        """Mimic cv2.VideoCapture.set(). Accept width/height/fps. Does not restart pipeline.
+
+        Returns True if the property is accepted (but may not take effect until next init).
+        """
+        try:
+            if prop == cv2.CAP_PROP_FRAME_WIDTH:
+                self._width = int(value)
+                return True
+            if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+                self._height = int(value)
+                return True
+            if prop == cv2.CAP_PROP_FPS:
+                self._fps = int(value)
+                return True
+        except Exception:
+            pass
+        return False
+
+    def read(self):
+        if not self.isOpened():
+            return False, None
+        try:
+            frames = self._pipeline.wait_for_frames(timeout_ms=5000)
+            color = frames.get_color_frame()
+            if not color:
+                return False, None
+            # convert to numpy
+            import numpy as _np
+            img = _np.asanyarray(color.get_data())
+            return True, img
+        except Exception as e:
+            print(f"RealSense read failed: {e}")
+            return False, None
+
+    def release(self):
+        try:
+            if getattr(self, "_pipeline", None) is not None:
+                self._pipeline.stop()
+        except Exception:
+            pass
+
+
+def try_open_camera(index):
+    """Try to open a camera using several candidate names and OpenCV backends.
+
+    Returns (cv2.VideoCapture, candidate_used, api_used) or (None, None, None) on failure.
+    """
+    # Start with configured index and device path
+    candidates = [index, f"/dev/video{index}"]
+
+    # Add all available /dev/video* nodes as additional candidates (sorted)
+    try:
+        devs = sorted(glob.glob('/dev/video*'))
+        for d in devs:
+            if d not in candidates:
+                candidates.append(d)
+    except Exception:
+        pass
+
+    # build a list of OpenCV API preferences we can try
+    backends = []
+    for api_name in ("CAP_V4L2", "CAP_GSTREAMER", "CAP_FFMPEG", "CAP_ANY"):
+        api = getattr(cv2, api_name, None)
+        if api is not None:
+            backends.append(api)
+
+    # Try each candidate with each backend
+    for candidate in candidates:
+        # Normalize candidate: if it's numeric-like, pass integer to VideoCapture
+        try:
+            cand_int = int(candidate)
+        except Exception:
+            cand_int = None
+
+        for api in backends:
+            try:
+                if cand_int is not None:
+                    cap = cv2.VideoCapture(cand_int, api)
+                else:
+                    cap = cv2.VideoCapture(candidate, api)
+            except Exception:
+                try:
+                    if cand_int is not None:
+                        cap = cv2.VideoCapture(cand_int)
+                    else:
+                        cap = cv2.VideoCapture(candidate)
+                except Exception:
+                    cap = None
+
+            if cap is not None and cap.isOpened():
+                return cap, candidate, api
+
+        # Also try without specifying backend (some backends misreport availability)
+        try:
+            if cand_int is not None:
+                cap = cv2.VideoCapture(cand_int)
+            else:
+                cap = cv2.VideoCapture(candidate)
+        except Exception:
+            cap = None
+
+        if cap is not None and cap.isOpened():
+            return cap, candidate, None
+
+    # Final fallback: try default open with index
+    try:
+        cap = cv2.VideoCapture(index)
+        if cap.isOpened():
+            return cap, index, None
+    except Exception:
+        pass
+
+    # If OpenCV failed, try RealSense via pyrealsense2 (if available)
+    if REALSENSE_AVAILABLE:
+        try:
+            rs_cap = RealSenseCapture(device_index=index)
+            if rs_cap.isOpened():
+                return rs_cap, f"realsense[{index}]", "pyrealsense2"
+        except Exception:
+            pass
+
+    return None, None, None
+
+
+def print_device_diagnostics():
+    """Print helpful diagnostics about /dev/video* devices and current user/group."""
+    devices = glob.glob('/dev/video*')
+    if not devices:
+        print("No /dev/video* nodes found.")
+    else:
+        print("Available video devices and permissions:")
+        for d in devices:
+            try:
+                st = os.stat(d)
+                owner = pwd.getpwuid(st.st_uid).pw_name
+                group = grp.getgrgid(st.st_gid).gr_name
+                perms = oct(st.st_mode & 0o777)
+                print(f"  {d}: owner={owner}, group={group}, perms={perms}")
+            except Exception as e:
+                print(f"  {d}: stat error: {e}")
+
+    user = getpass.getuser()
+    try:
+        primary = grp.getgrgid(os.getgid()).gr_name
+    except Exception:
+        primary = None
+    # groups where the user is a member (supplementary groups)
+    supplementary = [g.gr_name for g in grp.getgrall() if user in g.gr_mem]
+    groups = []
+    if primary:
+        groups.append(primary)
+    groups.extend(supplementary)
+    print(f"Current user: {user}")
+    print(f"Groups: {groups}")
 
 
 def test_cameras():
@@ -46,50 +327,123 @@ def test_cameras():
     try:
         # Test external camera
         print(f"[1/4] Testing external camera (index {config.EXTERNAL_CAMERA_INDEX})...")
-        external_camera = cv2.VideoCapture(config.EXTERNAL_CAMERA_INDEX)
+        # If RealSense SDK is available and a device is present, try it first
+        external_camera = None
+        used_ext_candidate = None
+        used_ext_api = None
+        try:
+            if REALSENSE_AVAILABLE:
+                ctx = rs.context()
+                devices = ctx.query_devices()
+                if len(devices) > 0:
+                    print("Attempting to open RealSense color stream via pyrealsense2...")
+                    rs_cap = RealSenseCapture(device_index=0)
+                    if rs_cap.isOpened():
+                        external_camera = rs_cap
+                        used_ext_candidate = "realsense[0]"
+                        used_ext_api = "pyrealsense2"
+        except Exception:
+            pass
+
+        if external_camera is None:
+            external_camera, used_ext_candidate, used_ext_api = try_open_camera(config.EXTERNAL_CAMERA_INDEX)
         
-        if not external_camera.isOpened():
+        if external_camera is None:
             print(f"❌ ERROR: Cannot open external camera at index {config.EXTERNAL_CAMERA_INDEX}")
+            print("\nDiagnostics:")
+            print_device_diagnostics()
             print("\nTroubleshooting:")
-            print("  - Check USB connection")
+            print("  - Check USB connection and that the camera is not in use by another process")
+            print("  - Ensure current user has permission to access /dev/video* (e.g. is in the 'video' group)")
             print("  - Try different index in config.py (0, 1, 2, etc.)")
-            print("  - List available cameras:")
-            print("    Linux: ls /dev/video*")
-            print("    macOS: system_profiler SPCameraDataType")
+            print("  - Use the device path (e.g. /dev/video0) if appropriate")
             return False
         
-        external_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-        external_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-        external_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
-        
-        ret, frame = external_camera.read()
-        if not ret:
-            print(f"❌ ERROR: Cannot read from external camera")
-            return False
-        
+        else:
+            print(f"✓ Opened external camera (candidate={used_ext_candidate}, api={used_ext_api})")
+
+            external_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+            external_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+            external_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+            
+            ret, frame = external_camera.read()
+            if not ret:
+                print(f"❌ ERROR: Cannot read from external camera")
+                return False
+
         print(f"✓ External camera working")
         print(f"  Resolution: {frame.shape[1]}x{frame.shape[0]}")
         print(f"  Channels: {frame.shape[2]}")
-        
+
         # Test wrist camera
-        print(f"\n[2/4] Testing wrist camera (index {config.WRIST_CAMERA_INDEX})...")
-        wrist_camera = cv2.VideoCapture(config.WRIST_CAMERA_INDEX)
+        print(f"\n[2/4] Testing wrist camera...")
+        wrist_camera = None
+        used_wrist_candidate = None
+        used_wrist_api = None
         
-        if not wrist_camera.isOpened():
-            print(f"❌ ERROR: Cannot open wrist camera at index {config.WRIST_CAMERA_INDEX}")
-            print("\nNote: If you only have one camera, update config.py:")
-            print("  WRIST_CAMERA_INDEX = EXTERNAL_CAMERA_INDEX")
+        # First, try Kinova built-in wrist camera (RTSP stream from robot)
+        print("Attempting to connect to Kinova wrist camera via RTSP...")
+        kinova_wrist = KinovaWristCamera(config.ROBOT_IP)
+        if kinova_wrist.open():
+            wrist_camera = kinova_wrist
+            used_wrist_candidate = f"rtsp://{config.ROBOT_IP}/color"
+            used_wrist_api = "RTSP (Kinova built-in)"
+            print("✓ Using Kinova built-in wrist camera")
+        else:
+            print("⚠ Kinova wrist camera not available, trying USB camera...")
+            # Fall back to USB camera with same index logic as before
+            if config.WRIST_CAMERA_INDEX == config.EXTERNAL_CAMERA_INDEX:
+                print(f"Note: Wrist camera index == external camera index ({config.WRIST_CAMERA_INDEX})")
+                print("  Using the same camera for both feeds (will share frames)")
+                wrist_camera = external_camera
+                used_wrist_candidate = used_ext_candidate
+                used_wrist_api = used_ext_api
+            else:
+                # Try to open a different camera for wrist
+                try:
+                    if REALSENSE_AVAILABLE:
+                        ctx = rs.context()
+                        devices = ctx.query_devices()
+                        # If multiple RealSense devices present, try the second as wrist
+                        if len(devices) > 1:
+                            print("Attempting to open second RealSense color stream via pyrealsense2...")
+                            rs_cap = RealSenseCapture(device_index=1)
+                            if rs_cap.isOpened():
+                                wrist_camera = rs_cap
+                                used_wrist_candidate = "realsense[1]"
+                                used_wrist_api = "pyrealsense2"
+                except Exception:
+                    pass
+
+                if wrist_camera is None:
+                    wrist_camera, used_wrist_candidate, used_wrist_api = try_open_camera(config.WRIST_CAMERA_INDEX)
+        
+        if wrist_camera is None:
+            print(f"❌ ERROR: Cannot open wrist camera")
+            print("\nTroubleshooting:")
+            print("  - For Kinova WRIST camera (robot end-effector):")
+            print("    * Ensure robot is powered on and connected")
+            print(f"    * Check ROBOT_IP in config.py: {config.ROBOT_IP}")
+            print(f"    * Test RTSP stream: ffplay rtsp://{config.ROBOT_IP}/color")
+            print("  - For USB wrist camera:")
+            print("    * If you only have ONE USB camera: WRIST_CAMERA_INDEX = EXTERNAL_CAMERA_INDEX")
+            print("    * If you have TWO USB cameras: check USB connections and try different indices")
+            print("\n")
+            print_device_diagnostics()
             return False
         
-        wrist_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
-        wrist_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
-        wrist_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
-        
-        ret, frame = wrist_camera.read()
-        if not ret:
-            print(f"❌ ERROR: Cannot read from wrist camera")
-            return False
-        
+        else:
+            print(f"✓ Opened wrist camera (candidate={used_wrist_candidate}, api={used_wrist_api})")
+
+            wrist_camera.set(cv2.CAP_PROP_FRAME_WIDTH, config.CAMERA_WIDTH)
+            wrist_camera.set(cv2.CAP_PROP_FRAME_HEIGHT, config.CAMERA_HEIGHT)
+            wrist_camera.set(cv2.CAP_PROP_FPS, config.CAMERA_FPS)
+            
+            ret, frame = wrist_camera.read()
+            if not ret:
+                print(f"❌ ERROR: Cannot read from wrist camera")
+                return False
+
         print(f"✓ Wrist camera working")
         print(f"  Resolution: {frame.shape[1]}x{frame.shape[0]}")
         print(f"  Channels: {frame.shape[2]}")

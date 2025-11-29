@@ -21,7 +21,7 @@ from pathlib import Path
 # ============================================================================
 # Robot Connection Settings
 # ============================================================================
-ROBOT_IP = "192.168.1.10"  
+ROBOT_IP = "192.168.2.9"  
 ROBOT_PORT = 10000
 ROBOT_USERNAME = "admin" # this is admin and admin in the kinova_arm.py file 
 ROBOT_PASSWORD = "admin"
@@ -42,19 +42,22 @@ CONTROL_FREQUENCY = 30  # Hz - should match training data FPS
 ACTION_HORIZON = 16     # Number of action steps to execute per inference
 MAX_EPISODE_STEPS = 500 # Maximum steps per episode
 
-# Joint limits (in degrees) - from training data stats
+# Joint limits (in degrees) - Based on actual training data
+# From datasets/visible+bowl_36eps/meta/stats.json
+# Format: (min - buffer, max + buffer) with safety margins
 JOINT_LIMITS = {
-    'joint_1': (0.0, 360.0),
-    'joint_2': (0.0, 360.0),
-    'joint_3': (212.0, 296.0),
-    'joint_4': (0.0, 360.0),
-    'joint_5': (282.0, 349.0),
-    'joint_6': (89.0, 144.0),
-    'gripper': (0.0, 100.0)
+    'joint_1': (0.0, 360.0),      # Training: 0.0-359.9 (full rotation)
+    'joint_2': (0.0, 360.0),      # Training: 0.1-359.7 (full rotation)
+    'joint_3': (192.0, 328.0),    # Training: 213.0-308.0 + buffer
+    'joint_4': (0.0, 360.0),      # Training: 0.0-360.0 (full rotation) - FIXED
+    'joint_5': (264.0, 360.0),    # Training: 284.2-349.9 + buffer
+    'joint_6': (60.0, 200.0),     # Training: 80.9-178.2 + buffer
+    'gripper': (0.0, 100.0)       # Training: 0.9-99.6
 }
 
 # Safety margins (degrees) - reduce range for safety
-SAFETY_MARGIN = 5.0
+# Full rotation joints (1,2,4) use smaller margin, limited joints use 10°
+SAFETY_MARGIN = 2.0  # Reduced for full-rotation joints
 
 # Maximum velocity/acceleration limits
 MAX_JOINT_VELOCITY = 20.0  # degrees/sec
@@ -64,8 +67,10 @@ MAX_JOINT_ACCELERATION = 50.0  # degrees/sec^2
 # Model Settings
 # ============================================================================
 REPO_PATH = Path(__file__).parent.parent
-DEFAULT_CHECKPOINT = REPO_PATH / "train_result" / "checkpoint-1000"
-DATA_PATH = REPO_PATH / "datasets" / "kinova_dataset_nov6"
+DEFAULT_CHECKPOINT = REPO_PATH / "train_result" / "checkpoint-5000"
+# DEFAULT_CHECKPOINT = "/home/ishita/L3D_Team4_src/Isaac-GR00T/train_result/checkpoint-5000"
+# DATA_PATH = REPO_PATH / "datasets" / "merged_dataset_nov22_30eps" 
+DATA_PATH = REPO_PATH / "datasets" / "visible+bowl_36eps" 
 
 # Normalization statistics (from training)
 STATS_PATH = DATA_PATH / "meta" / "stats.json"
@@ -73,7 +78,7 @@ STATS_PATH = DATA_PATH / "meta" / "stats.json"
 # ============================================================================
 # Task Settings
 # ============================================================================
-DEFAULT_TASK = "pick up the orange cup and place it into the blue bowl"
+DEFAULT_TASK = "Pick up the orange cup and place it on the black cross"
 
 # ============================================================================
 # Visualization & Logging
