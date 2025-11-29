@@ -110,7 +110,7 @@ class KinovaPolicyClient:
         # Prepare observation dict matching server's expected format
         obs_dict = {
             "video.external": np.expand_dims(external_img, axis=0),  # Add time dimension
-            "video.wrist": np.expand_dims(wrist_img, axis=0),
+            # "video.wrist": np.expand_dims(wrist_img, axis=0),
             "state.arm_joints": np.expand_dims(state[:6], axis=0),
             "state.gripper": np.expand_dims(state[6:7], axis=0),
             "annotation.human.task_description": [self.language_instruction],

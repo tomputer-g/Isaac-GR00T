@@ -59,7 +59,7 @@ def create_kinova_policy(checkpoint_path: str, device: str = "cuda:0") -> Gr00tP
     print(f"Loading Kinova GR00T policy from: {checkpoint_path}")
     
     # Define modality configuration for Kinova
-    video_keys = ["video.external", "video.wrist"]
+    video_keys = ["video.external"]#, "video.wrist"]
     state_keys = ["state.arm_joints", "state.gripper"]
     action_keys = ["action.arm_joints", "action.gripper"]
     language_keys = ["annotation.human.task_description"]

@@ -31,13 +31,13 @@ from gr00t.data.transform.video import (
 from gr00t.model.transforms import GR00TTransform
 # REPO_PATH is the path of the pip install gr00t repo and one level up
 REPO_PATH = os.path.dirname(os.path.dirname(gr00t.__file__))
-DATA_PATH = os.path.join(REPO_PATH, "datasets/kinova_dataset_nov6")
+DATA_PATH = os.path.join(REPO_PATH, "datasets/visible+bowl_36eps")
 
 print("Loading dataset... from", DATA_PATH)
 
 # 2. modality configs
 
-video_keys = ["video.external", "video.wrist"]
+video_keys = ["video.external"]#, "video.wrist"]
 state_keys = ["state.arm_joints", "state.gripper"]
 action_keys = ["action.arm_joints", "action.gripper"]
 language_keys = ["annotation.human.task_description"]
