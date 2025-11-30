@@ -352,6 +352,12 @@ def main():
                             if step % 10 == 0 or i == 0:  # Only print occasionally to avoid spam
                                 print(f"  ⚠ {name} would exceed limits: {pos:.1f}° (range: {safe_min:.1f}-{safe_max:.1f}°)")
                             # Clip to safe range
+                            if name == "joint_4":
+                                # Wrap-around joint
+                                while pos < 0:
+                                    pos += 360.0
+                                while pos > 360.0:
+                                    pos -= 360.0
                             concat_action[j] = np.clip(pos, safe_min, safe_max)
                     
                     # Send to robot (unless dry run)
