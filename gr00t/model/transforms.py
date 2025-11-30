@@ -187,7 +187,7 @@ class GR00TTransform(InvertibleModalityTransform):
             if 'clip_embeds' in data:
                 self._gs_map_clip_embeds = torch.from_numpy(data['clip_embeds']).float()
         elif map_path.suffix in ['.ckpt', '.pth', '.tar']:
-            checkpoint = torch.load(map_path, map_location='cpu')
+            checkpoint = torch.load(map_path, map_location='cpu', weights_only=False) ## RISK: pickle attack
             
             state_dict = checkpoint
             if 'pipeline' in checkpoint:
