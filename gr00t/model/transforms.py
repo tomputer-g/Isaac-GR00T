@@ -15,7 +15,7 @@
 
 import random
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
 
 import numpy as np
@@ -247,53 +247,173 @@ class GR00TTransform(InvertibleModalityTransform):
             except ImportError:
                 pass
 
-    def _query_gs_map(self, text_prompt: str) -> Optional[np.ndarray]:
+    def _query_gs_map(
+        self,
+        text_prompt: str,
+        similarity_threshold: float = 0.3,
+        top_k: int = 10,
+        w2c: Optional[np.ndarray] = None,
+        K: Optional[np.ndarray] = None,
+        image_size: Optional[Tuple[int, int]] = None,
+        assume_neg_z_forward: bool = True,
+    ) -> Optional[np.ndarray]:
         """
-            Used for 3DGS updated architecture.
+        Query the 3DGS map using CLIP similarity (Splat-MOVER-style) and
+        optionally filter candidates by camera field of view.
+
+        Args:
+            text_prompt: Text query.
+            similarity_threshold: Cosine similarity threshold before taking top_k.
+            top_k: Max number of gaussians to consider.
+            w2c: Optional 4x4 world/map -> camera transform (homogeneous).
+            K: Optional 3x3 intrinsics matrix.
+            image_size: Optional (H, W) for image bounds.
+            assume_neg_z_forward: If True, treats -Z as forward (Nerfstudio).
         """
         if self._gs_map_means is None or self._gs_map_clip_embeds is None:
             return None
-        
+
         try:
-            from sagesplat.clip.clip import tokenize
+            from sagesplat.clip.clip import load, tokenize
+
+            # ------------------------------------------------------------------
+            # 1) Load CLIP model (must match training backbone; RN50x64 in v2)
+            # ------------------------------------------------------------------
             if self._gs_clip_model is None:
-                from sagesplat.clip.clip import load
-                self._gs_clip_model, _ = load("ViT-B/32", device='cpu')
+                self._gs_clip_model, _ = load("RN50x64", device="cpu")
                 self._gs_clip_model.eval()
-            
-            tokens = tokenize([text_prompt])
+
+            # ------------------------------------------------------------------
+            # 2) Encode text query
+            # ------------------------------------------------------------------
             with torch.no_grad():
-                text_embed = self._gs_clip_model.encode_text(tokens).float()
-                text_embed = text_embed / text_embed.norm(dim=-1, keepdim=True)
-            
-            clip_embeds = self._gs_map_clip_embeds
+                tokens = tokenize([text_prompt])
+                text_embedding = self._gs_clip_model.encode_text(tokens).float()  # [1, D]
+                text_embedding = text_embedding / (
+                    text_embedding.norm(dim=-1, keepdim=True) + 1e-8
+                )
+
+            # ------------------------------------------------------------------
+            # 3) Decode gaussian CLIP latents -> full CLIP space (if decoder)
+            # ------------------------------------------------------------------
+            clip_latent = self._gs_map_clip_embeds  # [..., latent_dim]
+
             if self._gs_clip_decoder is not None:
                 with torch.no_grad():
-                    clip_embeds = self._gs_clip_decoder(clip_embeds.view(-1, clip_embeds.shape[-1]))
-                    clip_embeds = clip_embeds.view(*self._gs_map_clip_embeds.shape[:-1], -1)
-            
-            clip_embeds_norm = clip_embeds / (clip_embeds.norm(dim=-1, keepdim=True) + 1e-8)
-            similarities = (clip_embeds_norm @ text_embed.T).squeeze()
-            
-            top_k = min(1000, len(similarities))
-            _, indices = torch.topk(similarities, top_k)
-            mask = torch.zeros_like(similarities, dtype=torch.bool)
-            mask[indices] = True
-            
-            relevant_means = self._gs_map_means[mask]
-            if len(relevant_means) == 0:
+                    latent_dim = clip_latent.shape[-1]
+                    decoded = self._gs_clip_decoder(clip_latent.view(-1, latent_dim))
+                    gaussian_clip_full = decoded.view(*clip_latent.shape[:-1], -1)
+            else:
+                # Assume already in CLIP space
+                gaussian_clip_full = clip_latent
+
+            # L2-normalize gaussians
+            gaussian_clip_full = gaussian_clip_full / (
+                gaussian_clip_full.norm(dim=-1, keepdim=True) + 1e-8
+            )
+
+            # Flatten to [N, D]
+            gaussian_clip_flat = gaussian_clip_full.view(
+                -1, gaussian_clip_full.shape[-1]
+            )
+
+            # Match dtype
+            text_embedding = text_embedding.to(gaussian_clip_flat.dtype)
+
+            # ------------------------------------------------------------------
+            # 4) Similarity + threshold + top-K selection
+            # ------------------------------------------------------------------
+            with torch.no_grad():
+                similarities = (gaussian_clip_flat @ text_embedding.T).squeeze(-1)  # [N]
+
+            N = similarities.shape[0]
+
+            mask = similarities > similarity_threshold
+            if mask.sum() == 0:
+                # Fallback to global top-K
+                top_k_eff = min(top_k, N)
+                top_idx = torch.argsort(similarities, descending=True)[:top_k_eff]
+            else:
+                sim_sel = similarities[mask]
+                idx_sel = torch.where(mask)[0]
+                top_k_eff = min(top_k, sim_sel.shape[0])
+                order = torch.argsort(sim_sel, descending=True)[:top_k_eff]
+                top_idx = idx_sel[order]
+
+            if top_idx.numel() == 0:
                 return None
-            
-            goal_3d_map = relevant_means.mean(dim=0).numpy()
-            
+
+            # Selected 3D means (in map/world frame)
+            selected_means = self._gs_map_means[top_idx]  # [K, 3]
+
+            # ------------------------------------------------------------------
+            # 5) Optional FOV filtering (project into camera and keep only in-view)
+            # ------------------------------------------------------------------
+            if (
+                w2c is not None
+                and K is not None
+                and image_size is not None
+                and selected_means.numel() > 0
+            ):
+                H, W = image_size
+                top_means_np = selected_means.detach().cpu().numpy()  # [K, 3]
+
+                fov_keep_indices: list[int] = []
+
+                for i, pw in enumerate(top_means_np):
+                    # World/map -> Camera
+                    pw_h = np.concatenate([pw, [1.0]], axis=0)  # [4]
+                    pc_h = w2c @ pw_h                            # [4]
+                    pc = pc_h[:3]                                # [3]
+
+                    # Check "in front of camera"
+                    if assume_neg_z_forward:
+                        in_front = pc[2] < 0.0
+                    else:
+                        in_front = pc[2] > 0.0
+
+                    if not in_front:
+                        continue
+
+                    # Project (no distortion): p_img ~ K @ p_cam
+                    # NOTE: pc is 3D in camera coordinates
+                    if pc[2] == 0.0:
+                        continue
+
+                    pix_h = K @ pc  # [3]
+                    u = pix_h[0] / pix_h[2]
+                    v = pix_h[1] / pix_h[2]
+
+                    in_bounds = (0.0 <= u < float(W)) and (0.0 <= v < float(H))
+
+                    if in_bounds:
+                        fov_keep_indices.append(i)
+
+                if len(fov_keep_indices) > 0:
+                    # Restrict to only FOV candidates
+                    top_idx = top_idx[fov_keep_indices]
+                    selected_means = self._gs_map_means[top_idx]
+
+                    if selected_means.numel() == 0:
+                        return None
+                # else: no candidates in FOV -> keep original selection
+
+            # ------------------------------------------------------------------
+            # 6) Aggregate selected 3D positions and map->base transform
+            # ------------------------------------------------------------------
+            goal_3d_map = selected_means.mean(dim=0).cpu().numpy()  # [3]
+
             if self._map_to_base_transform is not None:
-                goal_homogeneous = np.append(goal_3d_map, 1.0)
-                goal_base_homogeneous = self._map_to_base_transform @ goal_homogeneous
-                return goal_base_homogeneous[:3]
-            
+                goal_h = np.append(goal_3d_map, 1.0)  # [x, y, z, 1]
+                goal_base_h = self._map_to_base_transform @ goal_h
+                return goal_base_h[:3]
+
             return goal_3d_map
+
         except Exception:
+            # Silent fallback in case CLIP/decoder is missing or anything breaks
             return None
+
 
     def check_keys_and_batch_size(self, data):
         grouped_keys = {}
@@ -487,7 +607,7 @@ class GR00TTransform(InvertibleModalityTransform):
         if self._gs_map_means is not None:
             goal_text = self._extract_goal_from_prompt(language)
             if goal_text:
-                goal_3d = self._query_gs_map(goal_text)
+                goal_3d = self._query_gs_map(text_prompt=goal_text)
             if goal_3d is None:
                 goal_3d = np.zeros(3, dtype=np.float32)
                 goal_visible = np.array([0.0], dtype=np.float32)
