@@ -125,7 +125,7 @@ class GR00TTransform(InvertibleModalityTransform):
     eagle_processor: ProcessorMixin = Field(default=build_eagle_processor(DEFAULT_EAGLE_PATH))
     
     # gs_map_path: Optional[str] = Field(default=None)
-    gs_map_path: str = "/home/ishita/L3D_Team4_src/Isaac-GR00T/3dgs_checkpoints/checkpoint.pth"
+    gs_map_path: str = "/home/ishita/L3D_Team4_src/Isaac-GR00T/3dgs_checkpoints/step-000055999.ckpt"
     map_to_base_transform_path: Optional[str] = Field(default=None)
 
     # XEmbDiT arguments
