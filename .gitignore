@@ -2,6 +2,12 @@ datasets/
 getting_started/plot_result/
 plot_result/
 train_result/
+3dgs_checkpoints/
+nov30_train_result/
+nov30_train_result_7_20PM/
+nov30_train_result_8/
+nov30_train_results_with3D/
+
 # C extensions
 *.so
 

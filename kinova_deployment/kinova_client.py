@@ -348,17 +348,17 @@ def main():
                         safe_min = min_val + config.SAFETY_MARGIN
                         safe_max = max_val - config.SAFETY_MARGIN
                         
-                        if not (safe_min <= pos <= safe_max):
-                            if step % 10 == 0 or i == 0:  # Only print occasionally to avoid spam
-                                print(f"  ⚠ {name} would exceed limits: {pos:.1f}° (range: {safe_min:.1f}-{safe_max:.1f}°)")
-                            # Clip to safe range
-                            if name == "joint_4":
-                                # Wrap-around joint
-                                while pos < 0:
-                                    pos += 360.0
-                                while pos > 360.0:
-                                    pos -= 360.0
-                            concat_action[j] = np.clip(pos, safe_min, safe_max)
+                        # if not (safe_min <= pos <= safe_max):
+                        #     if step % 10 == 0 or i == 0:  # Only print occasionally to avoid spam
+                        #         print(f"  ⚠ {name} would exceed limits: {pos:.1f}° (range: {safe_min:.1f}-{safe_max:.1f}°)")
+                        #     # Clip to safe range
+                        #     # if name == "joint_4":
+                        #     #     # Wrap-around joint
+                        #     #     while pos < 0:
+                        #     #         pos += 360.0
+                        #     #     while pos > 360.0:
+                        #     #         pos -= 360.0
+                        #     concat_action[j] = np.clip(pos, safe_min, safe_max)
                     
                     # Send to robot (unless dry run)
                     if not args.dry_run:

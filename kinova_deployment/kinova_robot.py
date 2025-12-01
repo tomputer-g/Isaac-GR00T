@@ -285,10 +285,12 @@ class KinovaGen3Robot:
         if target_positions.shape != (7,):
             raise ValueError(f"Expected shape (7,), got {target_positions.shape}")
         
+        target_positions[3] = 360
+        target_positions[6] = max(0, min(100, target_positions[6]))
         # Validate positions are within limits
-        if not self._is_safe_position(target_positions):
-            print("WARNING: Target position outside safe limits, clipping...")
-            target_positions = self._clip_to_safe_limits(target_positions)
+        # if not self._is_safe_position(target_positions):
+        #     print("WARNING: Target position outside safe limits, clipping...")
+        #     target_positions = self._clip_to_safe_limits(target_positions)
         
         try:
             # Send arm joint positions
